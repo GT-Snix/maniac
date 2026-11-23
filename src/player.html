@@ -34,7 +34,7 @@
     <span><b>maniac</b></span>
     <span id="time">0:00</span>
     <div class="track" id="track"><div class="fill" id="fill"></div></div>
-    <span class="keys"><kbd>space</kbd> pause <kbd>&larr;</kbd><kbd>&rarr;</kbd> seek <kbd>b</kbd> bloom</span>
+    <span class="keys"><kbd>space</kbd> pause <kbd>&larr;</kbd><kbd>&rarr;</kbd> seek <kbd>b</kbd> bloom <kbd>v</kbd> record</span>
   </div>
 </main>
 <script>
@@ -113,7 +113,8 @@ function fit() {
 function loop(now) {
   if (playing) {
     let f = Math.floor((now - t0) / 1000 * M.fps);
-    if (f >= M.n + M.fps * 1.5) { seek(0); f = 0; }
+    if (rec && f >= M.n) { rec.stop(); playing = false; }
+    if (!rec && f >= M.n + M.fps * 1.5) { seek(0); f = 0; }
     goto(Math.min(f, M.n - 1));
   }
   if (dirty) {
@@ -124,7 +125,30 @@ function loop(now) {
     time.textContent = `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
     dirty = false;
   }
+  if (rec) recDraw();
   requestAnimationFrame(loop);
+}
+
+// Record the whole scene (with bloom) to a WebM in real time, then download it.
+let rec = null, recDraw = null;
+function record() {
+  if (rec || !window.MediaRecorder) return;
+  const comp = document.createElement('canvas'), cx = comp.getContext('2d'), chunks = [];
+  comp.width = cv.width; comp.height = cv.height;
+  const type = ['video/webm;codecs=vp9', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  rec = new MediaRecorder(comp.captureStream(M.fps), { mimeType: type, videoBitsPerSecond: 16e6 });
+  rec.ondataavailable = e => chunks.push(e.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type: 'video/webm' }));
+    a.download = 'maniac.webm'; a.click(); rec = null;
+  };
+  recDraw = () => {
+    cx.globalCompositeOperation = 'source-over'; cx.globalAlpha = 1; cx.filter = 'none'; cx.drawImage(cv, 0, 0);
+    if (bloom) { cx.globalCompositeOperation = 'screen'; cx.globalAlpha = .4; cx.filter = 'blur(9px) saturate(1.4)'; cx.drawImage(bl, 0, 0, comp.width, comp.height); }
+    time.textContent = '\u25CF REC ' + time.textContent.replace(/^\u25CF REC /, '');
+  };
+  seek(0); playing = true; t0 = performance.now(); rec.start();
 }
 
 function toggle() {
@@ -138,6 +162,7 @@ addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft') seek(frame - 2 * M.fps);
   if (e.key === 'b') { bloom = !bloom; dirty = true; }
   if (e.key === 'r') seek(0);
+  if (e.key === 'v') record();
 });
 document.getElementById('stage').onclick = toggle;
 document.getElementById('track').onclick = e => {

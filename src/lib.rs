@@ -378,6 +378,100 @@ impl Path {
     }
 }
 
+// ───────────────────────────── physics ─────────────────────────────
+
+/// A deterministic, seekable simulation. `at(t)` steps forward in fixed `dt` steps from the last state,
+/// or restarts from `init` when time goes backwards, so scenes stay pure functions of time (and HTML
+/// export, seeking and looping all still work).
+pub struct Sim<S> {
+    dt: f32,
+    init: Box<dyn Fn() -> S>,
+    step: Box<dyn Fn(&mut S, f32, f32)>,
+    state: std::cell::RefCell<(f32, S)>,
+}
+
+impl<S> Sim<S> {
+    /// `step(state, time, dt)` advances the state by one tick.
+    pub fn new(dt: f32, init: impl Fn() -> S + 'static, step: impl Fn(&mut S, f32, f32) + 'static) -> Sim<S> {
+        let s = init();
+        Sim { dt, init: Box::new(init), step: Box::new(step), state: std::cell::RefCell::new((0.0, s)) }
+    }
+    /// The state at time `t`.
+    pub fn at(&self, t: f32) -> std::cell::Ref<'_, S> {
+        {
+            let mut st = self.state.borrow_mut();
+            if t < st.0 {
+                *st = (0.0, (self.init)());
+            }
+            let (now, s) = &mut *st;
+            while *now + self.dt <= t {
+                (self.step)(s, *now, self.dt);
+                *now += self.dt;
+            }
+        }
+        std::cell::Ref::map(self.state.borrow(), |s| &s.1)
+    }
+}
+
+/// A springy rope of points (verlet). Node 0 is pinned; every other node is pulled back toward its rest
+/// pose, hard near the root and softly near the tip, so it sways like seaweed, hair or an anemone arm.
+#[derive(Clone, Debug)]
+pub struct Chain {
+    pub pts: Vec<V2>,
+    prev: Vec<V2>,
+    rest: Vec<V2>,
+    seg: f32,
+    /// Spring strength toward the rest pose at the (root, tip).
+    pub stiff: (f32, f32),
+    /// Velocity kept each step (0..1).
+    pub damping: f32,
+}
+
+impl Chain {
+    /// Grow `n` nodes, `len` long in total, from `root` at `angle`, turning by `curl` radians per segment.
+    pub fn new(root: V2, angle: f32, n: usize, len: f32, curl: f32) -> Chain {
+        let n = n.max(2);
+        let seg = len / (n - 1) as f32;
+        let (mut pts, mut a) = (vec![root], angle);
+        for _ in 1..n {
+            let p = pts[pts.len() - 1];
+            pts.push((p.0 + a.cos() * seg, p.1 + a.sin() * seg));
+            a += curl;
+        }
+        Chain { prev: pts.clone(), rest: pts.clone(), pts, seg, stiff: (40.0, 3.0), damping: 0.97 }
+    }
+    /// Advance by `dt` under an acceleration field `force(point, node)` (currents, wind, gravity).
+    pub fn step(&mut self, dt: f32, force: impl Fn(V2, usize) -> V2) {
+        let n = self.pts.len();
+        for i in 1..n {
+            let k = lerp(self.stiff.0, self.stiff.1, i as f32 / (n - 1) as f32);
+            let (p, q, r, f) = (self.pts[i], self.prev[i], self.rest[i], force(self.pts[i], i));
+            let acc = (f.0 + k * (r.0 - p.0), f.1 + k * (r.1 - p.1));
+            self.prev[i] = p;
+            self.pts[i] = (p.0 + (p.0 - q.0) * self.damping + acc.0 * dt * dt, p.1 + (p.1 - q.1) * self.damping + acc.1 * dt * dt);
+        }
+        for _ in 0..3 {
+            for i in 1..n {
+                let (a, b) = (self.pts[i - 1], self.pts[i]);
+                let k = self.seg / dist(a, b).max(1e-6);
+                self.pts[i] = (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k);
+            }
+        }
+    }
+    /// Shove every node out of a circle (a swimmer, a hand, a rock).
+    pub fn push_out(&mut self, c: V2, r: f32) {
+        for p in self.pts.iter_mut().skip(1) {
+            let d = dist(*p, c);
+            if d < r && d > 1e-6 {
+                *p = (c.0 + (p.0 - c.0) * r / d, c.1 + (p.1 - c.1) * r / d);
+            }
+        }
+    }
+    pub fn path(&self) -> Path {
+        Path::new(self.pts.clone(), false)
+    }
+}
+
 // ───────────────────────────── canvas ─────────────────────────────
 
 #[derive(Clone, Copy, PartialEq)]
@@ -542,26 +636,11 @@ impl Canvas {
     pub fn shade(&mut self, f: impl Fn(f32, f32) -> Option<Rgb> + Sync) {
         let (cols, pu, a) = (self.cols, self.unit / 2.0, self.alpha);
         let (cx, cy) = (cols as f32 / 2.0, self.rows as f32);
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-        let chunk = (self.rows * 2).div_ceil(threads).max(1) * cols;
         let f = &f;
-        let work = move |ci: usize, part: &mut [Rgb]| {
-            for (k, px) in part.iter_mut().enumerate() {
-                let i = ci * chunk + k;
-                let (x, y) = ((i % cols) as f32 + 0.5, (i / cols) as f32 + 0.5);
-                if let Some(c) = f((x - cx) / pu, (cy - y) / pu) {
-                    *px = if a >= 1.0 { c } else { px.mix(c, a) };
-                }
-            }
-        };
-        std::thread::scope(|s| {
-            for (ci, part) in self.pix.chunks_mut(chunk).enumerate() {
-                // run on this thread if spawning is impossible (e.g. wasm)
-                if threads == 1 {
-                    work(ci, part);
-                } else {
-                    std::thread::Builder::new().spawn_scoped(s, move || work(ci, part)).expect("spawn");
-                }
+        par(&mut self.pix, cols, move |i, px| {
+            let (x, y) = ((i % cols) as f32 + 0.5, (i / cols) as f32 + 0.5);
+            if let Some(c) = f((x - cx) / pu, (cy - y) / pu) {
+                *px = if a >= 1.0 { c } else { px.mix(c, a) };
             }
         });
     }
@@ -668,31 +747,118 @@ impl Canvas {
 
     // ── text ──
 
-    fn put(&mut self, p: V2, s: &str, upto: usize, caret: bool, ink: &impl Ink) {
+    /// Put one character into the cell at `col`, `row` (0, 0 is the top left). Off-screen is ignored.
+    pub fn set(&mut self, col: i32, row: i32, ch: char, c: Rgb) {
+        if col >= 0 && row >= 0 && (col as usize) < self.cols && (row as usize) < self.rows {
+            self.txt[row as usize * self.cols + col as usize] = (ch, self.col(c));
+        }
+    }
+    /// The cell (column, row) that world point `p` falls in.
+    pub fn cell_at(&self, p: V2) -> (i32, i32) {
+        let (x, y) = self.to_dot(p);
+        ((x / 2.0).floor() as i32, (y / 4.0).floor() as i32)
+    }
+    fn put(&mut self, p: V2, s: &str, upto: usize, caret: bool, left: bool, ink: &impl Ink) {
         let n = s.chars().count();
         let (x, y) = self.to_dot(p);
-        let (cx, cy) = ((x / 2.0 - n as f32 / 2.0).round() as i32, (y / 4.0).floor() as i32);
-        if cy < 0 || cy >= self.rows as i32 {
-            return;
-        }
+        let start = if left { x / 2.0 } else { x / 2.0 - n as f32 / 2.0 };
+        let (cx, cy) = (start.round() as i32, (y / 4.0).floor() as i32);
         let chars = s.chars().take(upto).chain(caret.then_some('▌'));
         for (i, ch) in chars.enumerate() {
-            let x = cx + i as i32;
-            if ch != ' ' && x >= 0 && x < self.cols as i32 {
-                let c = self.col(ink.at(i as f32 / (n.max(2) - 1) as f32));
-                self.txt[cy as usize * self.cols + x as usize] = (ch, c);
+            if ch != ' ' {
+                self.set(cx + i as i32, cy, ch, ink.at(i as f32 / (n.max(2) - 1) as f32));
             }
         }
     }
     /// Text centered at `p`. The ink runs across the characters.
     pub fn text(&mut self, p: V2, s: &str, ink: impl Ink) {
-        self.put(p, s, usize::MAX, false, &ink);
+        self.put(p, s, usize::MAX, false, false, &ink);
+    }
+    /// Text starting at `p` (left aligned). Good for HUDs and lists.
+    pub fn label(&mut self, p: V2, s: &str, ink: impl Ink) {
+        self.put(p, s, usize::MAX, false, true, &ink);
     }
     /// Typewriter: reveal fraction `prog` of `s` with a caret. Layout stays put while it types.
     pub fn write(&mut self, p: V2, s: &str, prog: f32, ink: impl Ink) {
         let n = s.chars().count();
         let k = (prog.clamp(0.0, 1.0) * n as f32).round() as usize;
-        self.put(p, s, k, k < n && prog > 0.0, &ink);
+        self.put(p, s, k, k < n && prog > 0.0, false, &ink);
+    }
+    /// A line drawn in characters picked by its slope (`-` `/` `|` `\`), the classic ASCII-art look.
+    pub fn glyph_line(&mut self, a: V2, b: V2, ink: impl Ink) {
+        let ch = slope_char(b.0 - a.0, b.1 - a.1);
+        let (pa, pb) = (self.to_dot(a), self.to_dot(b));
+        let (ax, ay, dx, dy) = (pa.0 / 2.0, pa.1 / 4.0, (pb.0 - pa.0) / 2.0, (pb.1 - pa.1) / 4.0);
+        let n = dx.abs().max(dy.abs()).ceil().clamp(1.0, 4000.0) as usize;
+        let mut last = (i32::MIN, i32::MIN);
+        for k in 0..=n {
+            let s = k as f32 / n as f32;
+            let cell = ((ax + dx * s).floor() as i32, (ay + dy * s).floor() as i32);
+            if cell != last {
+                self.set(cell.0, cell.1, ch, ink.at(s));
+                last = cell;
+            }
+        }
+    }
+    /// Character shader: `f(x, y)` gives a brightness (0..1) and a color for each cell, or `None` to skip it.
+    /// The character comes from `ramp` (dark to bright, e.g. [`RAMP_DENSE`]) and the color is shaded by
+    /// brightness. Runs on every core. This is how you draw solid, lit things out of letters.
+    pub fn ascii(&mut self, ramp: &str, f: impl Fn(f32, f32) -> Option<(f32, Rgb)> + Sync) {
+        let ramp: Vec<char> = ramp.chars().collect();
+        let (cols, u, a, bg) = (self.cols, self.unit, self.alpha, self.bg);
+        let (cx, cy) = (cols as f32, self.rows as f32 * 2.0);
+        let (f, ramp) = (&f, &ramp);
+        par(&mut self.txt, cols, move |i, cell| {
+            let (col, row) = ((i % cols) as f32, (i / cols) as f32);
+            if let Some((l, c)) = f(((col + 0.5) * 2.0 - cx) / u, (cy - (row + 0.5) * 4.0) / u) {
+                let l = l.clamp(0.0, 1.0);
+                let ch = ramp[((l * ramp.len() as f32) as usize).min(ramp.len() - 1)];
+                if ch != ' ' {
+                    let c = c.dim(0.3 + 0.7 * l);
+                    *cell = (ch, if a >= 1.0 { c } else { bg.mix(c, a) });
+                }
+            }
+        });
+    }
+    /// A syntax-highlighted source listing with line numbers. `p` is the top-left corner; shows `rows`
+    /// lines starting at line `first` (0-based), cut at `width` cells. Try it with `include_str!(file!())`.
+    pub fn code(&mut self, p: V2, src: &str, first: usize, rows: usize, width: usize) {
+        let (c0, r0) = self.cell_at(p);
+        for (k, line) in src.lines().skip(first).take(rows).enumerate() {
+            let r = r0 + k as i32;
+            for (j, ch) in format!("{:>4} ", first + k + 1).chars().enumerate() {
+                self.set(c0 + j as i32, r, ch, GREY.dim(0.55));
+            }
+            for (j, (ch, c)) in highlight(line).into_iter().take(width.saturating_sub(5)).enumerate() {
+                if ch != ' ' {
+                    self.set(c0 + 5 + j as i32, r, ch, c);
+                }
+            }
+        }
+    }
+    /// Mirror everything above the line `y` into the area below it, like still water. `ripple` is the
+    /// sideways wobble in cells (driven by time `t`), `tint` the water color, and `fade` (0..1) how much
+    /// the reflection dies away with depth. Call it after drawing the scene, then draw things in the water.
+    pub fn reflect(&mut self, y: f32, t: f32, ripple: f32, tint: Rgb, fade: f32) {
+        let (cols, rows) = (self.cols, self.rows);
+        let rw = (self.to_dot((0.0, y)).1 / 4.0).round().clamp(0.0, rows as f32) as usize;
+        for r in rw..rows.min(2 * rw) {
+            let (d, src) = (r - rw, 2 * rw - 1 - r);
+            let k = d as f32 / (rows - rw).max(1) as f32;
+            let keep = (0.7 - fade * k).clamp(0.0, 1.0) * self.alpha;
+            let shift = (ripple * (r as f32 * 1.3 + t * 2.4).sin() * (0.4 + k)).round() as i32;
+            for c in 0..cols {
+                let sc = (c as i32 - shift).clamp(0, cols as i32 - 1) as usize;
+                let (si, di) = (src * cols + sc, r * cols + c);
+                let (ch, fg) = self.txt[si];
+                self.txt[di] = if ch == '\0' { ('\0', self.bg) } else { (mirror_char(ch), tint.mix(fg, keep)) };
+                self.dots[di] = flip_braille(self.dots[si]);
+                self.dcol[di] = tint.mix(self.dcol[si], keep);
+                let (top, bot) = (self.pix[2 * src * cols + sc], self.pix[(2 * src + 1) * cols + sc]);
+                self.pix[2 * r * cols + c] = tint.mix(bot, keep);
+                self.pix[(2 * r + 1) * cols + c] = tint.mix(top, keep);
+            }
+        }
     }
 
     // ── 3D ──
@@ -766,6 +932,112 @@ impl Canvas {
             }
         }
     }
+}
+
+/// Run `work(index, item)` over a buffer, split by rows (`row` items each) across every core.
+/// Falls back to one thread where threads can't be spawned (e.g. wasm).
+fn par<T: Send>(data: &mut [T], row: usize, work: impl Fn(usize, &mut T) + Sync) {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let chunk = (data.len() / row.max(1)).div_ceil(threads).max(1) * row.max(1);
+    let work = &work;
+    let run = move |ci: usize, part: &mut [T]| part.iter_mut().enumerate().for_each(|(k, x)| work(ci * chunk + k, x));
+    std::thread::scope(|s| {
+        for (ci, part) in data.chunks_mut(chunk).enumerate() {
+            if threads == 1 {
+                run(ci, part);
+            } else {
+                std::thread::Builder::new().spawn_scoped(s, move || run(ci, part)).expect("spawn");
+            }
+        }
+    });
+}
+
+/// Character ramps for [`Canvas::ascii`], dark to bright.
+pub const RAMP_SOFT: &str = " .:-=+*#%@";
+pub const RAMP_DENSE: &str = " .'`^\",:;Il!i~+_-?][}{1)(|/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+pub const RAMP_BLOCK: &str = " ░▒▓█";
+pub const RAMP_DIGITS: &str = " .:-o0O8$@";
+
+/// The ASCII character that best draws a line going in direction (dx, dy).
+pub fn slope_char(dx: f32, dy: f32) -> char {
+    match dy.atan2(dx).to_degrees().rem_euclid(180.0) as u32 {
+        0..=24 | 156..=180 => '-',
+        25..=69 => '/',
+        70..=110 => '|',
+        _ => '\\',
+    }
+}
+
+fn mirror_char(c: char) -> char {
+    match c {
+        '/' => '\\',
+        '\\' => '/',
+        '^' => 'v',
+        'v' => '^',
+        '▀' => '▄',
+        '▄' => '▀',
+        _ => c,
+    }
+}
+
+fn flip_braille(m: u8) -> u8 {
+    let mut o = 0;
+    for (x, col) in BRAILLE.iter().enumerate() {
+        for y in 0..4 {
+            if m & col[y] != 0 {
+                o |= BRAILLE[x][3 - y];
+            }
+        }
+    }
+    o
+}
+
+/// Tiny Rust-ish highlighter for [`Canvas::code`].
+fn highlight(line: &str) -> Vec<(char, Rgb)> {
+    const KW: &[&str] = &[
+        "fn", "let", "mut", "for", "in", "if", "else", "match", "return", "use", "pub", "const", "move",
+        "struct", "impl", "enum", "while", "loop", "as", "self", "Self", "true", "false", "def", "import",
+    ];
+    let (cs, mut out, mut i) = (line.chars().collect::<Vec<_>>(), Vec::new(), 0);
+    let span = |out: &mut Vec<(char, Rgb)>, s: &[char], c: Rgb| out.extend(s.iter().map(|&ch| (ch, c)));
+    while i < cs.len() {
+        let c = cs[i];
+        let mut j = i + 1;
+        if (c == '/' && cs.get(i + 1) == Some(&'/')) || c == '#' {
+            span(&mut out, &cs[i..], GREY);
+            break;
+        } else if c == '"' {
+            while j < cs.len() && cs[j] != '"' {
+                j += 1;
+            }
+            j = (j + 1).min(cs.len());
+            span(&mut out, &cs[i..j], GREEN);
+        } else if c.is_ascii_digit() {
+            while j < cs.len() && (cs[j].is_ascii_alphanumeric() || cs[j] == '.' || cs[j] == '_') {
+                j += 1;
+            }
+            span(&mut out, &cs[i..j], GOLD);
+        } else if c.is_alphabetic() || c == '_' {
+            while j < cs.len() && (cs[j].is_alphanumeric() || cs[j] == '_') {
+                j += 1;
+            }
+            let w: String = cs[i..j].iter().collect();
+            let col = if KW.contains(&w.as_str()) {
+                PINK
+            } else if cs.get(j) == Some(&'(') || cs.get(j) == Some(&'!') {
+                SKY
+            } else if c.is_uppercase() {
+                TEAL
+            } else {
+                Rgb::hex(0xC9D1E6)
+            };
+            span(&mut out, &cs[i..j], col);
+        } else {
+            out.push((c, Rgb::hex(0x8A93B0)));
+        }
+        i = j;
+    }
+    out
 }
 
 /// 3×5 pixel font, rows top to bottom, 3 bits each.
@@ -860,6 +1132,8 @@ pub struct Scene {
     pub bg: Rgb,
     /// Loop forever in the terminal (Ctrl-C to quit).
     pub looped: bool,
+    /// Columns × rows for HTML export. (160, 45) is 16:9; (90, 80) is a 9:16 portrait for phones.
+    pub size: (usize, usize),
 }
 
 impl Default for Scene {
@@ -870,7 +1144,7 @@ impl Default for Scene {
 
 impl Scene {
     pub fn new() -> Scene {
-        Scene { clips: Vec::new(), cursor: 0.0, last: 0.0, fps: 60.0, bg: BG, looped: false }
+        Scene { clips: Vec::new(), cursor: 0.0, last: 0.0, fps: 60.0, bg: BG, looped: false, size: (160, 45) }
     }
     fn push(&mut self, start: f32, dur: f32, f: impl Fn(&mut Canvas, Tick) + 'static) -> &mut Clip {
         self.last = start;
@@ -930,13 +1204,20 @@ impl Scene {
         c.alpha = 1.0;
     }
 
-    /// `--html [file]` on the command line bakes an HTML player, otherwise plays in the terminal.
+    /// `--html [file]` on the command line bakes an HTML player (`--size 90x80` picks its columns and
+    /// rows), otherwise the scene plays in the terminal.
     pub fn show(&self) {
         let args: Vec<String> = std::env::args().collect();
-        match args.iter().position(|a| a == "--html") {
-            Some(i) => {
-                let path = args.get(i + 1).map_or("manic.html", |s| s.as_str());
-                self.html(path, 160, 45).expect("could not write html");
+        let arg = |flag: &str| args.iter().position(|a| a == flag).map(|i| args.get(i + 1).cloned().unwrap_or_default());
+        let size = arg("--size").and_then(|s| {
+            let (c, r) = s.split_once('x')?;
+            Some((c.parse().ok()?, r.parse().ok()?))
+        });
+        match arg("--html") {
+            Some(path) => {
+                let path = if path.is_empty() || path.starts_with("--") { "maniac.html".to_string() } else { path };
+                let (cols, rows) = size.unwrap_or(self.size);
+                self.html(&path, cols, rows).expect("could not write html");
                 eprintln!("wrote {path}");
             }
             None => self.run(),
