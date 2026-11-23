@@ -1,0 +1,16 @@
+[package]
+name = "maniac"
+version = "0.1.0"
+edition = "2021"
+description = "A tiny, fast, very colorful ASCII animation engine. Everything is a function of time."
+license = "MIT"
+
+[dependencies]
+
+[profile.dev]
+opt-level = 3
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "unwind"

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>maniac</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: __BG__; --fg: #c9d1e6; --dim: #5b6380; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--fg); font-family: "JetBrains Mono", ui-monospace, monospace; }
+  body { display: grid; place-items: center; padding: 16px; overflow: hidden; }
+  main { display: flex; flex-direction: column; gap: 12px; }
+  .stage { position: relative; border-radius: 10px; overflow: hidden; cursor: pointer;
+    box-shadow: 0 0 0 1px #ffffff14, 0 30px 80px #000c, 0 0 140px #7a5cff26; }
+  canvas { display: block; }
+  #bloom { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;
+    filter: blur(9px) saturate(1.5); mix-blend-mode: screen; opacity: .6; }
+  .bar { display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--dim); }
+  .bar b { color: var(--fg); font-weight: 700; }
+  .track { flex: 1; height: 6px; border-radius: 3px; background: #ffffff14; cursor: pointer; position: relative; }
+  .fill { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: 3px;
+    background: linear-gradient(90deg, #ff00e5, #7a5cff, #00e5ff); }
+  kbd { font: inherit; padding: 1px 5px; border-radius: 4px; background: #ffffff10; border: 1px solid #ffffff1a; color: var(--fg); }
+  @media (max-width: 640px) { .keys { display: none; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="stage" id="stage"><canvas id="cv"></canvas><canvas id="bloom"></canvas></div>
+  <div class="bar">
+    <span><b>maniac</b></span>
+    <span id="time">0:00</span>
+    <div class="track" id="track"><div class="fill" id="fill"></div></div>
+    <span class="keys"><kbd>space</kbd> pause <kbd>&larr;</kbd><kbd>&rarr;</kbd> seek <kbd>b</kbd> bloom</span>
+  </div>
+</main>
+<script>
+const M = __META__;
+const raw = atob("__DATA__"), B = new Uint8Array(raw.length);
+for (let i = 0; i < raw.length; i++) B[i] = raw.charCodeAt(i);
+
+const N = M.cols * M.rows, CH = new Uint32Array(N).fill(32), FG = new Uint32Array(N), BG = new Uint32Array(N);
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d', { alpha: false });
+const bl = document.getElementById('bloom'), bx = bl.getContext('2d');
+const fill = document.getElementById('fill'), time = document.getElementById('time');
+const BR = [[0,0],[0,1],[0,2],[1,0],[1,1],[1,2],[0,3],[1,3]];
+const hex = v => '#' + v.toString(16).padStart(6, '0');
+let cw = 8, chh = 16, frame = -1, playing = true, bloom = true, t0 = 0, dirty = true;
+
+function cell(i) {
+  const x = (i % M.cols) * cw, y = ((i / M.cols) | 0) * chh, c = CH[i];
+  ctx.fillStyle = hex(BG[i]); ctx.fillRect(x, y, cw, chh);
+  if (c === 32) return;
+  ctx.fillStyle = hex(FG[i]);
+  if (c === 0x2580) { ctx.fillRect(x, y, cw, chh / 2); return; }
+  if (c === 0x258C) { ctx.fillRect(x, y, cw / 2, chh); return; }
+  if (c >= 0x2800 && c < 0x2900) {
+    const b = c - 0x2800, r = Math.max(0.7, cw * 0.17);
+    ctx.beginPath();
+    for (let k = 0; k < 8; k++) if (b >> k & 1) {
+      const px = x + (BR[k][0] * 2 + 1) * cw / 4, py = y + (BR[k][1] * 2 + 1) * chh / 8;
+      ctx.moveTo(px + r, py); ctx.arc(px, py, r, 0, 6.2832);
+    }
+    ctx.fill(); return;
+  }
+  ctx.fillText(String.fromCodePoint(c), x + cw / 2, y + chh / 2 + cw * 0.06);
+}
+
+function apply(f, draw) {
+  let p = M.offs[f], end = f + 1 < M.n ? M.offs[f + 1] : B.length, pos = 0, ch = 32, fg = 0, bg = 0;
+  const vi = () => { let v = 0, s = 0, b; do { b = B[p++]; v += (b & 127) * 2 ** s; s += 7; } while (b & 128); return v; };
+  while (p < end) {
+    const fl = B[p++];
+    if (fl & 1) pos += vi();
+    if (fl & 2) ch = vi();
+    if (fl & 4) { fg = B[p] << 16 | B[p + 1] << 8 | B[p + 2]; p += 3; }
+    if (fl & 8) { bg = B[p] << 16 | B[p + 1] << 8 | B[p + 2]; p += 3; }
+    CH[pos] = ch; FG[pos] = fg; BG[pos] = bg;
+    if (draw) cell(pos);
+    pos++;
+  }
+}
+
+function seek(f) {
+  f = Math.max(0, Math.min(M.n - 1, f));
+  for (let i = 0; i <= f; i++) apply(i, false);
+  for (let i = 0; i < N; i++) cell(i);
+  frame = f; dirty = true;
+  t0 = performance.now() - f / M.fps * 1000;
+}
+
+function goto(f) {
+  if (f < frame) return seek(f);
+  while (frame < f) { apply(++frame, true); dirty = true; }
+}
+
+function fit() {
+  const dpr = devicePixelRatio || 1;
+  const css = Math.max(2, Math.min((innerWidth - 32) / M.cols, (innerHeight - 80) / (M.rows * 2)));
+  cw = Math.max(2, Math.floor(css * dpr)); chh = cw * 2;
+  cv.width = M.cols * cw; cv.height = M.rows * chh;
+  cv.style.width = cv.width / dpr + 'px'; cv.style.height = cv.height / dpr + 'px';
+  bl.width = Math.ceil(cv.width / 4); bl.height = Math.ceil(cv.height / 4);
+  ctx.font = `${cw / 0.6}px "JetBrains Mono", ui-monospace, monospace`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (let i = 0; i < N; i++) cell(i);
+  dirty = true;
+}
+
+function loop(now) {
+  if (playing) {
+    let f = Math.floor((now - t0) / 1000 * M.fps);
+    if (f >= M.n + M.fps * 1.5) { seek(0); f = 0; }
+    goto(Math.min(f, M.n - 1));
+  }
+  if (dirty) {
+    bx.clearRect(0, 0, bl.width, bl.height);
+    if (bloom) bx.drawImage(cv, 0, 0, bl.width, bl.height);
+    const s = Math.max(0, frame) / M.fps;
+    fill.style.width = (100 * frame / Math.max(1, M.n - 1)) + '%';
+    time.textContent = `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+    dirty = false;
+  }
+  requestAnimationFrame(loop);
+}
+
+function toggle() {
+  playing = !playing;
+  if (playing) t0 = performance.now() - frame / M.fps * 1000;
+}
+
+addEventListener('keydown', e => {
+  if (e.key === ' ') { toggle(); e.preventDefault(); }
+  if (e.key === 'ArrowRight') seek(frame + 2 * M.fps);
+  if (e.key === 'ArrowLeft') seek(frame - 2 * M.fps);
+  if (e.key === 'b') { bloom = !bloom; dirty = true; }
+  if (e.key === 'r') seek(0);
+});
+document.getElementById('stage').onclick = toggle;
+document.getElementById('track').onclick = e => {
+  const r = e.currentTarget.getBoundingClientRect();
+  seek(Math.round((e.clientX - r.left) / r.width * (M.n - 1)));
+};
+addEventListener('resize', fit);
+
+Promise.race([document.fonts.load('20px "JetBrains Mono"'), new Promise(r => setTimeout(r, 1500))])
+  .then(() => { fit(); seek(0); requestAnimationFrame(loop); });
+</script>
+</body>
+</html>
