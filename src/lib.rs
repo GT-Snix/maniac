@@ -840,15 +840,15 @@ impl Canvas {
         }
     }
     /// Mirror everything above the line `y` into the area below it, like still water. `ripple` is the
-    /// sideways wobble in cells (driven by time `t`), `tint` the water color, and `fade` (0..1) how much
-    /// the reflection dies away with depth. Call it after drawing the scene, then draw things in the water.
-    pub fn reflect(&mut self, y: f32, t: f32, ripple: f32, tint: Rgb, fade: f32) {
+    /// sideways wobble in cells (driven by time `t`), `tint` the water color, and `strength` (0..1) how
+    /// clearly the scene shows at the shoreline; it fades out further down. Call it after drawing the scene, then draw things in the water.
+    pub fn reflect(&mut self, y: f32, t: f32, ripple: f32, tint: Rgb, strength: f32) {
         let (cols, rows) = (self.cols, self.rows);
         let rw = (self.to_dot((0.0, y)).1 / 4.0).round().clamp(0.0, rows as f32) as usize;
         for r in rw..rows.min(2 * rw) {
             let (d, src) = (r - rw, 2 * rw - 1 - r);
             let k = d as f32 / (rows - rw).max(1) as f32;
-            let keep = (0.7 - fade * k).clamp(0.0, 1.0) * self.alpha;
+            let keep = (strength * (1.0 - 0.75 * k)).clamp(0.0, 1.0) * self.alpha;
             let shift = (ripple * (r as f32 * 1.3 + t * 2.4).sin() * (0.4 + k)).round() as i32;
             for c in 0..cols {
                 let sc = (c as i32 - shift).clamp(0, cols as i32 - 1) as usize;
