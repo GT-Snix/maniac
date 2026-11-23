@@ -82,14 +82,14 @@ fn m_at(t: f32) -> M {
     cur
 }
 
-const IHAT: Rgb = Rgb::hex(0x7CFF6B);
-const JHAT: Rgb = Rgb::hex(0xFF5C7A);
+const IHAT: Rgb = Rgb::hex(0x8FD16F);
+const JHAT: Rgb = Rgb::hex(0xE86A6A);
 
-/// A thick glowing arrow.
+/// A vector: a soft halo, a two-dot-wide shaft and an arrowhead.
 fn vector(c: &mut Canvas, from: V2, to: V2, col: Rgb) {
-    c.neon(&Path::line(from, to), col);
-    let n = (0.035, 0.035);
-    c.line((from.0 + n.0, from.1 - n.1), (to.0 + n.0, to.1 - n.1), col);
+    c.neon_k(&Path::line(from, to), col, 0.14);
+    let n = (0.03, 0.03);
+    c.line((from.0 + n.0, from.1 - n.1), (to.0 + n.0, to.1 - n.1), col.dim(0.8));
     c.arrow(from, to, col);
 }
 
@@ -182,7 +182,7 @@ fn main() {
         let sq = Path::new(vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], true).map(|p| ap(m, p));
         let d = det(m);
         let ink = if d < 0.0 { [PINK, MAGENTA] } else { [GOLD, ORANGE] };
-        c.fill(&sq, ink, 0.45);
+        c.fill(&sq, ink, 0.3);
         c.stroke(&sq, ink);
         let mid = ap(m, (0.5, 0.5));
         c.text(mid, &format!("area {:.2}", d.abs()), WHITE);
@@ -194,8 +194,8 @@ fn main() {
     s.at(43.0, 9.5, |c, k| {
         let m = m_at(k.time);
         let show = ((k.t - 0.5) / 1.0).clamp(0.0, 1.0);
-        c.neon(&Path::line(ap(I, (-9.0, 0.0)), ap(I, (9.0, 0.0))), GOLD.dim(0.5 * show));
-        c.neon(&Path::line(ap(I, (-6.0, 6.0)), ap(I, (6.0, -6.0))), TEAL.dim(0.5 * show));
+        c.neon_k(&Path::line(ap(I, (-9.0, 0.0)), ap(I, (9.0, 0.0))), GOLD.dim(0.6 * show), 0.2);
+        c.neon_k(&Path::line(ap(I, (-6.0, 6.0)), ap(I, (6.0, -6.0))), TEAL.dim(0.6 * show), 0.2);
         for n in 0..16 {
             let a = TAU * n as f32 / 16.0;
             let tip = ap(m, (a.cos() * 1.2, a.sin() * 1.2));
@@ -219,11 +219,11 @@ fn main() {
     s.at(53.5, 8.0, |c, k| {
         let m = m_at(k.time);
         let heart = Path::heart(1.2).at(-2.2, 1.2).map(|p| ap(m, p));
-        c.fill(&heart, [PINK, RED], 0.35);
-        c.neon(&heart, |u| hsv(0.95 + u * 0.12, 0.7, 1.0));
+        c.fill(&heart, [PINK, RED], 0.25);
+        c.neon_k(&heart, |u| hsv(0.95 + u * 0.12, 0.6, 0.95), 0.2);
         let star = Path::star(5, 0.9, 0.4).at(2.3, -1.2).map(|p| ap(m, p));
-        c.fill(&star, [GOLD, ORANGE], 0.35);
-        c.neon(&star, SUNSET);
+        c.fill(&star, [GOLD, ORANGE], 0.25);
+        c.neon_k(&star, SUNSET, 0.2);
     })
     .fade_in(0.8)
     .fade_out(1.0);

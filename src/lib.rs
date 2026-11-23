@@ -474,9 +474,15 @@ impl Canvas {
     }
     /// A stroke with a soft glow underneath. The crowd favourite.
     pub fn neon(&mut self, p: &Path, ink: impl Ink) {
-        let n = (p.len() * 5.0) as usize + 2;
-        for (i, q) in p.resample(n).pts.into_iter().enumerate() {
-            self.glow(q, 0.32, ink.at(i as f32 / (n - 1) as f32).dim(0.55));
+        self.neon_k(p, ink, 0.4);
+    }
+    /// [`neon`](Canvas::neon) with a chosen glow strength: 0 = plain stroke, 0.4 = default, 1 = blinding.
+    pub fn neon_k(&mut self, p: &Path, ink: impl Ink, strength: f32) {
+        if strength > 0.0 {
+            let n = (p.len() * 5.0) as usize + 2;
+            for (i, q) in p.resample(n).pts.into_iter().enumerate() {
+                self.glow(q, 0.3, ink.at(i as f32 / (n - 1) as f32).dim(strength));
+            }
         }
         self.stroke(p, ink);
     }
