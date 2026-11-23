@@ -142,4 +142,4 @@ and half blocks themselves, so those stay crisp.
 - Full-screen shaders change every cell in every frame, so baked HTML gets big. The showcase is about 19 MB.
 - Text is placed one character per cell, so wide characters (CJK, emoji) break the alignment.
 - In-browser recording is real time and WebM only. Use `tools/render.mjs` for frame-exact MP4.
-- `lib.rs` is about 1,600 lines with comments. That's short for what it does, but it isn't tiny.
+- `lib.rs` is about 1,400 lines with comments. That's short for what it does, but it isn't tiny.
