@@ -786,7 +786,10 @@ impl Canvas {
     }
     /// A line drawn in characters picked by its slope (`-` `/` `|` `\`), the classic ASCII-art look.
     pub fn glyph_line(&mut self, a: V2, b: V2, ink: impl Ink) {
-        let ch = slope_char(b.0 - a.0, b.1 - a.1);
+        self.char_line(a, b, slope_char(b.0 - a.0, b.1 - a.1), ink);
+    }
+    /// A line of one repeated character, one per cell.
+    pub fn char_line(&mut self, a: V2, b: V2, ch: char, ink: impl Ink) {
         let (pa, pb) = (self.to_dot(a), self.to_dot(b));
         let (ax, ay, dx, dy) = (pa.0 / 2.0, pa.1 / 4.0, (pb.0 - pa.0) / 2.0, (pb.1 - pa.1) / 4.0);
         let n = dx.abs().max(dy.abs()).ceil().clamp(1.0, 4000.0) as usize;
