@@ -1,30 +1,51 @@
 # maniac
 
 A small ASCII animation engine in Rust. It borrows manim's best idea (a timeline of
-animations you play one after another) but drops the object system. Every animation
-here is just a function of time:
+animations you play one after another) but skips the object system. Every animation here
+is just a function of time:
 
 ```rust
 s.play(1.5, |c, k| c.neon(&circle.partial(k.p), rainbow));
 ```
 
 `c` is the canvas, `k` is the tick (`k.p` is eased progress from 0 to 1, `k.time` is
-seconds since the scene began). Draw whatever you like in there. Maths, a solar
-system, fireworks, a title card: anything that moves.
+seconds since the scene began). Draw whatever you like in there: maths, a fish in an
+anemone, a pond at night, fireworks, a title card.
 
-One file (`src/lib.rs`), no dependencies.
+One library file (`src/lib.rs`), no dependencies.
+
+| matrix | reef | pond |
+|---|---|---|
+| ![matrix](media/matrix.gif) | ![reef](media/reef.gif) | ![pond](media/pond.gif) |
+
+Full videos: [matrix.mp4](media/matrix.mp4), [reef.mp4](media/reef.mp4), [pond.mp4](media/pond.mp4).
 
 ## Run it
 
 ```sh
-cargo run --release --example showcase                      # plays in your terminal
-cargo run --release --example showcase -- --html show.html  # bakes an HTML player
-cargo run --release --example matrix                       # linear transformations demo
+cargo run --release --example showcase                         # plays in your terminal
+cargo run --release --example matrix -- --html matrix.html     # bakes an HTML player
+cargo run --release --example reef -- --html reef.html         # portrait scenes pick 90x80
+cargo run --release --example pond -- --html pond.html --size 60x54
 ```
 
-`showcase.html`, `matrix.html` and `hello.html` in this folder are already baked, and `matrix.mp4` is the matrix demo as a 1080p video. Open them in a
-browser. Space pauses, the arrow keys seek, `b` toggles bloom, and clicking the bar
-jumps.
+| example    | what it shows |
+|------------|---------------|
+| `hello`    | the smallest scene: draw a circle, morph it into a star, type a line |
+| `showcase` | a 50-second tour of everything: morphs, graphs, Fourier, 3D, shaders, fireworks |
+| `matrix`   | linear transformations: shear, rotation, composition, determinants, eigenvectors |
+| `reef`     | a fish drawn with a character shader, weaving through 40 spring-physics anemone arms, with its own source scrolling below |
+| `pond`     | moonlit wall, swaying grass, a lantern carrier, fireflies, all mirrored in rippling water |
+
+## Making videos
+
+There are two ways.
+
+- **In the browser:** open a baked `.html` and press `v`. It plays from the start and downloads a WebM, with the bloom included. This records in real time.
+- **MP4 from the command line:** `node tools/render.mjs scene.html scene.mp4` drives headless Chrome to draw every frame in JetBrains Mono and pipes them to ffmpeg. It needs Node 22+, Chrome and ffmpeg. A 1080p minute takes a bit over a minute.
+
+The HTML player itself: space pauses, the arrow keys seek, `b` toggles bloom, `v` records,
+and clicking the bar jumps.
 
 ## The smallest scene
 
@@ -49,16 +70,16 @@ fn main() {
 ## How it works
 
 The world is laid out like manim's. The origin is in the middle, y points up, and the
-screen is always 8 units tall, so a circle of radius 2 looks the same at any terminal
-size. `c.w()` gives you the half-width.
+screen is always 8 units tall, so a circle of radius 2 looks the same at any size. `c.w()`
+gives you the half-width.
 
 Each terminal cell is built from three layers:
 
 | layer  | resolution per cell        | used by |
 |--------|----------------------------|---------|
-| pixels | 2 full-color (`▀` halves)  | `fill`, `shade`, `glow`, `disc`, `big` |
+| pixels | 2 full-color (`▀` halves)  | `fill`, `shade`, `glow`, `disc`, `big`, `panel` |
 | dots   | 8 braille dots             | `line`, `stroke`, `neon`, `arrow`, `grid`, `axes`, `mesh` |
-| text   | 1 character                | `text`, `write`, `surface` |
+| text   | 1 character                | `text`, `label`, `write`, `ascii`, `glyph_line`, `code`, `surface` |
 
 Text sits on top of the dots, and the dots sit on top of the pixels. Colors are 24-bit
 everywhere.
@@ -66,50 +87,59 @@ everywhere.
 ### Timeline (`Scene`)
 
 - `play(dur, f)` runs after everything before it. `also(dur, f)` starts alongside the previous clip. `at(t, dur, f)` starts at an absolute time. `always(f)` runs for the whole scene. `wait(d)` adds a pause.
-- Each of those returns a clip you can chain: `.ease(ease::bounce)`, `.hold()`, `.linger(2.0)`, `.until(t)`, `.fade_in(d)`, `.fade_out(d)`. Fades apply to everything the clip draws, so you never have to handle alpha yourself.
-- A clip disappears when it ends unless you `hold` it. That makes chains like create, then morph, then morph again work without bookkeeping.
+- Each of those returns a clip you can chain: `.ease(ease::bounce)`, `.hold()`, `.linger(2.0)`, `.until(t)`, `.fade_in(d)`, `.fade_out(d)`. Fades apply to everything the clip draws.
+- `s.size = (90, 80)` makes a 9:16 portrait export. `--size COLSxROWS` overrides it from the command line.
 
 ### Shapes (`Path`)
 
 `circle`, `rect`, `poly`, `star`, `heart`, `line`, `func(f, x0, x1)`, `param(f)`. You can
 transform any of them with `at`, `scale`, `rot`, or `map(any fn)`. `partial(p)` gives you
-manim's Create, and `morph(&other, p)` gives you Transform. Every built-in shape starts at
-the top and runs clockwise, so any one of them morphs cleanly into any other.
+manim's Create, and `morph(&other, p)` gives you Transform.
+
+### Drawing with characters
+
+- `ascii(ramp, |x, y| Some((brightness, color)))` is a character shader, run on every core. Each cell picks its character from a ramp (`RAMP_DENSE`, `RAMP_SOFT`, `RAMP_DIGITS`, `RAMP_BLOCK`, or your own string) and its color is shaded by brightness. The fish, moon, wall and lily pads are all drawn this way.
+- `glyph_line(a, b, ink)` draws a line in `- / | \`, chosen by its slope. `char_line` repeats one character instead. `slope_char(dx, dy)` gives you the character on its own.
+- `reflect(y, t, ripple, tint, strength)` mirrors everything above a line into the water below, with a ripple. Draw the scene, call it, then draw things in the water.
+- `code(p, src, first, rows, width)` shows highlighted source with line numbers. `include_str!` a file and it can show itself.
+- `label` draws left-aligned text, `set(col, row, ch, color)` writes one cell, `cell_at(p)` tells you which cell a point falls in, and `panel` draws a solid box that hides what's under it.
+
+### Physics, still seekable
+
+- `Sim::new(dt, init, step)` steps a simulation forward at a fixed `dt`, and restarts from `init` when time goes backwards. Scenes stay pure functions of time, so seeking, looping and HTML export keep working.
+- `Chain::new(root, angle, nodes, length, curl)` is a springy verlet rope. It's pinned at the root and pulled back toward its rest pose, hard near the root and softly near the tip. `step(dt, force)` applies currents or wind, and `push_out(center, r)` keeps it out of the way of a swimmer. It works for seaweed, hair, tails and tentacles.
 
 ### Color
 
-You can pass a color to any `ink` argument as a plain `Rgb`, as a gradient array (`SUNSET`, `OCEAN`,
-`NEON`, `AURORA`, `FIRE`, `ICE`, or your own `[Rgb; N]`), or as a closure from position to color,
-`|u| rainbow(u + k.time)`. The helpers are `hsv`, `grad`, `rainbow`, `Rgb::mix`, `Rgb::dim`,
-plus a manim-ish palette of constants.
+You can pass any `ink` argument as a plain `Rgb`, a gradient array (`SUNSET`, `OCEAN`, `NEON`,
+`AURORA`, `FIRE`, `ICE`, or your own `[Rgb; N]`), or a closure `|u| rainbow(u + k.time)`.
+The helpers are `hsv`, `grad`, `rainbow`, `Rgb::mix` and `Rgb::dim`. `neon_k(path, ink, strength)`
+lets you choose how much glow a stroke gets; plain `neon` uses 0.4.
 
 ### Extras
 
-- `shade(|x, y| Some(color))` runs a pixel shader over the whole screen, split across all CPU cores.
-- `surface(|u, v| point, ink)` draws a lit, z-buffered ASCII surface (the donut.c idea, for any shape). Normals are computed for you. `torus`, `sphere` and `cube` are included, and `rot3` and `add3` move them around.
-- `panel(center, w, h, color, opacity)` draws a solid box that hides whatever is under it. Put one behind labels. `cell()` gives the size of one terminal cell in world units.
-- `hash`, `noise` and `stagger` give you deterministic randomness, smooth noise and manim's LaggedStart. Because nothing is random at runtime, every frame depends only on time, so scenes can be seeked and baked to HTML.
-- `ease::{smooth, linear, in_cubic, out_cubic, in_out, back, elastic, bounce, there_and_back}`.
+`shade` (a pixel shader on every core), `surface` (lit, z-buffered 3D in characters),
+`mesh`, `rot3`, `torus`, `sphere`, `cube`, `hash` and `noise` (deterministic randomness),
+`stagger` (manim's LaggedStart), `big` (a chunky pixel font), and a full set of easing curves.
 
 ## Speed
 
-- The terminal player diffs each frame against the last one and only writes cells that changed. It also skips cursor moves and color codes that are already in effect, so all the escape codes for a frame go out in one write.
-- The HTML export stores frames as binary deltas: a one-byte flag per changed cell, followed only by the fields that changed.
-- The whole 50-second showcase (about 1,500 frames at 160×45) bakes in about 1.3 seconds, and that was single-threaded inside WebAssembly. Native should be faster.
+- The terminal player diffs each frame against the last one and only writes cells that changed, skipping cursor moves and color codes that are already in effect.
+- The HTML export stores frames as binary deltas.
+- The 50-second showcase (about 1,500 frames at 160×45) bakes in about 1.3 seconds single-threaded inside WebAssembly. The reef (720 frames, with 40 physics chains and a shader) bakes in 0.5 seconds.
 
 ## JetBrains Mono
 
-A program can't choose your terminal's font. For the terminal, set JetBrains Mono in your
-terminal's own settings. Any monospace font works, but braille and half blocks look best in
-fonts that draw them edge to edge. The HTML player loads JetBrains Mono from Google Fonts
-and uses it for every glyph. It draws the braille dots and half blocks itself, so they
-stay crisp even where a font lacks them.
+A program can't choose your terminal's font, so set JetBrains Mono in your terminal's own
+settings. The HTML player and the MP4 renderer load it from Google Fonts. They draw braille
+and half blocks themselves, so those stay crisp.
 
 ## Honest limits
 
-- You need a terminal with truecolor (iTerm2, WezTerm, Kitty, Alacritty, Ghostty, and recent versions of Terminal.app all have it). On terminals with 256 colors or fewer, colors will look wrong.
-- There's no keyboard input yet. Ctrl-C quits, and the signal handler restores the terminal first. Typed keys may echo over the picture.
-- Native terminal sizing and signals use raw `ioctl`/`signal` calls on Unix. On other platforms it falls back to a fixed 120×36 and has no Ctrl-C cleanup.
-- Full-screen shaders change every cell in every frame, so those parts of a baked HTML file are big. The showcase file is about 19 MB, mostly because of its 5-second plasma section.
-- Text is placed one character per cell. Wide characters (CJK, emoji) will throw off the alignment.
-- `lib.rs` is about 1,100 lines with comments. That's "short" for what it does, but it isn't tiny.
+- The terminal needs truecolor (iTerm2, WezTerm, Kitty, Alacritty, Ghostty, recent Terminal.app).
+- There's no keyboard input in the terminal player. Ctrl-C quits and restores the terminal.
+- Terminal sizing and signals use raw Unix calls. Elsewhere it falls back to 120×36.
+- Full-screen shaders change every cell in every frame, so baked HTML gets big. The showcase is about 19 MB.
+- Text is placed one character per cell, so wide characters (CJK, emoji) break the alignment.
+- In-browser recording is real time and WebM only. Use `tools/render.mjs` for frame-exact MP4.
+- `lib.rs` is about 1,600 lines with comments. That's short for what it does, but it isn't tiny.
